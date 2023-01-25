@@ -1,40 +1,47 @@
-use std::collections::BTreeMap;
+use maplit::{hashset, hashmap};
 use std::collections::{HashMap, HashSet};
 
 mod parse;
+mod combine;
 
 #[derive(Hash, Debug, Clone, Eq, PartialEq)]
 struct TypeId(String);
 
-struct TypeDef {
-    fieldid_to_typeid: Option<HashMap<TypeId, TypeId>>,
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct Data(Vec<u8>);
+
+struct ProdDef {
+    params: Option<Vec<TypeId>>, // determines order. invariant: no dups
     emit: bool,
-    seal: bool,
+}
+
+struct ProdTypes(HashMap<TypeId, ProdDef>);
+
+struct Spec {
+    prod_types: ProdTypes,
+    inference_exprs: InferenceExprs,
+}
+
+struct InferenceExprs {
+    aver_exprs: HashSet<Expr>,
+    sift_exprs: HashSet<Expr>,
 }
 
 #[derive(Hash, Eq, Clone, Debug, PartialEq)]
-enum AtomicTerm {
+enum Constant {
     Int(i64),
-    Str(String),
-    Bool(bool),
-    Unit,
+    Bit(bool),
 }
 
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
-struct Term {
-    alias: TypeId,
-    values: TermValue,
-}
-
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
-enum TermValue {
-    AtomicTerm(AtomicTerm),
-    CompositeTerm { type_id: TypeId, fields: BTreeMap<TypeId, Term> },
+#[derive(Debug)]
+struct Values {
+    type_id: TypeId,
+    datas: HashSet<Data>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct Kb {
-    reals: HashSet<Term>,
+    reals: HashMap<TypeId, HashSet<Data>>,
 }
 
 enum Aggregator {
@@ -44,17 +51,14 @@ enum Aggregator {
 }
 
 enum Expr {
-    AtomicTerm(AtomicTerm),
+    Constant(Constant),
     Aggregate { aggregator: Aggregator, expr: Box<Expr> },
-    Role { alias: TypeId, expr: Box<Expr> },
     Take { alias: TypeId, expr: Box<Expr> },
     When { condition: Box<Expr>, result: Box<Expr> },
-}
-
-struct Spec {
-    type_defs: HashMap<TypeId, TypeDef>,
-    aver_exprs: HashSet<Expr>,
-    sift_exprs: HashSet<Expr>,
+    Product {
+        type_id: TypeId,
+        args: Vec<Expr>, // invariant: Type IDs matches params exactly
+    }
 }
 
 enum EvalError {
@@ -63,81 +67,162 @@ enum EvalError {
 
 //////////////////////
 
-fn retained<T, F: FnMut(&T) -> bool>(f: F, mut s: HashSet<T>) -> HashSet<T> {
-    s.retain(f);
-    s
+impl TypeId {
+    fn int() -> Self {
+        Self::new("int")
+    }
+    fn bit() -> Self {
+        Self::new("bit")
+    }
+    fn new(s: &str) -> Self {
+        Self(s.into())
+    }   
 }
 
-impl AtomicTerm {
-    fn type_id(&self) -> TypeId {
-        todo!()
-    }
-}
-
-impl Term {
-    fn singleton(self) -> HashSet<Self> {
-        let mut set = HashSet::default();
-        set.insert(self);
-        set
-    }
-    fn atomic_bool(b: bool) -> Self {
-        Term::AtomicTerm(AtomicTerm::Bool(b))
-    }
-    fn atomic_bool_eval(&self) -> Result<bool, EvalError> {
-        if let Term::AtomicTerm(AtomicTerm::Bool(b)) = self {
-            return Ok(*b);
-        }
-        Err(EvalError::UnexpectedType { got: self.type_id(), expected: TypeId("str".into()) })
-    }
+impl Constant {
     fn type_id(&self) -> TypeId {
         match self {
-            Term::AtomicTerm(atomic_term) => atomic_term.type_id(),
-            Term::CompositeTerm { type_id, .. } => type_id.clone(),
+            Constant::Int(_) => TypeId::int(),
+            Constant::Bit(_) => TypeId::bit(),
         }
-    }
-    fn is_atomic_true(&self) -> bool {
-        self.atomic_bool_eval().unwrap_or(false)
-    }
-    fn atomic_int_eval(&self) -> Result<i64, EvalError> {
-        if let Term::AtomicTerm(AtomicTerm::Int(i)) = self {
-            return Ok(*i);
-        }
-        Err(EvalError::UnexpectedType { got: self.type_id(), expected: TypeId("int".into()) })
     }
 }
 
-impl Kb {
-    fn eval(&self, expr: &Expr) -> Result<HashSet<Term>, EvalError> {
-        Ok(match expr {
-            Expr::AtomicTerm(atomic_term) => Term::AtomicTerm(atomic_term.clone()).singleton(),
-            Expr::Aggregate { aggregator: Aggregator::Any, expr } => Term::AtomicTerm(
-                AtomicTerm::Bool(self.eval(expr)?.iter().any(Term::is_atomic_true)),
-            )
-            .singleton(),
-            Expr::Aggregate { aggregator: Aggregator::All, expr } => Term::AtomicTerm(
-                AtomicTerm::Bool(self.eval(expr)?.iter().all(Term::is_atomic_true)),
-            )
-            .singleton(),
-            Expr::Aggregate { aggregator: Aggregator::Num, expr } => {
-                Term::AtomicTerm(AtomicTerm::Int(self.eval(expr)?.len() as i64)).singleton()
-            }
-            Expr::Role { alias, expr } => todo!(),
+impl Expr {
+    fn type_id(&self) -> TypeId {
+        match self{
+            Expr::Constant(constant) => constant.type_id(),
+            Expr::Aggregate { aggregator: Aggregator::Num, .. } => TypeId::int(),
+            Expr::Aggregate { .. } => TypeId::bit(),
+            Expr::Take { expr, .. } => expr.type_id(),
+            Expr::When { result, .. } => result.type_id(),
+            Expr::Product { type_id, .. } => type_id.clone(),
+        }
+    }
+}
+impl ProdTypes {
+    fn eval_const(&self, kb: &Kb, expr: &Expr, constant: &Constant) -> Values {
+        match constant {
+            Constant::Int(i) => Values {
+                type_id: TypeId::int(),
+                datas: hashset! { Data(i.to_ne_bytes().into_iter().collect()) },
+            },
+            Constant::Bit(b) => Values {
+                type_id: TypeId::bit(),
+                datas: hashset! { Data((*b as u8).to_ne_bytes().into_iter().collect()) },
+            },
+        }
+    }
+    fn product_instances(&self, args: &[Values]) -> HashSet<Data> {
+        let mut c = combine::Combination::new(args);
+        let mut x = HashSet::default();
+        while let Some(y) = c.next() {
+            x.insert(y);
+        }
+        x
+    }
+    fn eval(&self, kb: &Kb, expr: &Expr) -> Values {
+        match expr {
+            Expr::Constant(constant) => self.eval_const(kb, expr, constant),
+            Expr::Aggregate { aggregator, expr } => todo!(),
             Expr::Take { alias, expr } => todo!(),
             Expr::When { condition, result } => todo!(),
-        })
+            Expr::Product { type_id, args } => {
+                // let args_type_ids: HashSet<TypeId> = args.iter().map(Expr::type_id).collect();
+                // let params_type_ids: HashSet<TypeId> = self.0.get(type_id)
+                //     .expect("idk that type").params.as_ref()
+                //     .expect("unknown params for this type").iter().cloned().collect();
+                // if args_type_ids != params_type_ids {
+                //     panic!("params {:?} mismatch fields {:?}", params_type_ids, args_type_ids);
+                // }
+                let args: Vec<_> = args.iter().map(|arg| self.eval(kb, arg)).collect();
+                Values {
+                    type_id: type_id.clone(),
+                    datas: self.product_instances(&args),
+                }
+            },
+        }
     }
 }
 
 impl Spec {
-    fn infer(&self) -> Kb {
-        let mut kb = Kb::default();
-        'main: loop {
-            for aver_expr in &self.aver_exprs {}
-            return kb;
+    fn project<'a,'b>(&'a self, type_id: &'a TypeId, param_id: &'a TypeId, data: &'b [u8]) -> Option<&'b [u8]> {
+        let mut bytes = 0;
+        for p_id in self.prod_types.0.get(type_id)?.params.as_ref()? {
+            if param_id == p_id {
+                return Some(&data[bytes..]);
+            }
+            bytes += self.type_bytes(param_id)?;
         }
+        None
+    }
+    fn type_bytes(&self, type_id: &TypeId) -> Option<usize> {
+        Some(match &type_id.0 as &str {
+            "int" => std::mem::size_of::<i64>(),
+            "bit" => std::mem::size_of::<bool>(),
+            _ => { 
+                let mut bytes = 0;
+                for field_id in self.prod_types.0.get(type_id)?.params.as_ref()? {
+                    bytes += self.type_bytes(field_id)?;
+                }
+                bytes
+            } 
+        })
     }
 }
 
 fn main() {
-    println!("Hello, world!");
+    let kb = Kb::default();
+    let expr = Expr::Product {
+        type_id : TypeId::new("sale"),
+        args: vec![ 
+            Expr::Product {
+                type_id: TypeId::new("seller"),
+                args: vec![
+                    Expr::Product {
+                        type_id: TypeId::new("person"),
+                        args: vec![
+                            Expr::Constant(Constant::Bit(true)),
+                        ],
+                    }
+                ],
+            },
+            Expr::Product {
+                type_id: TypeId::new("buyer"),
+                args: vec![
+                    Expr::Product {
+                        type_id: TypeId::new("person"),
+                        args: vec![
+                            Expr::Constant(Constant::Bit(false)),
+                        ],
+                    }
+                ],
+            },
+        ],
+    };
+    let spec = Spec {
+        prod_types: ProdTypes(hashmap!{
+            TypeId::new("person") => ProdDef {
+                emit: false,
+                params: Some(vec![TypeId::bit()]),
+            },
+            TypeId::new("seller") => ProdDef {
+                emit: false,
+                params: Some(vec![TypeId::new("person")]),
+            },
+            TypeId::new("buyer") => ProdDef {
+                emit: false,
+                params: Some(vec![TypeId::new("person")]),
+            },
+            TypeId::new("sale") => ProdDef {
+                emit: false,
+                params: Some(vec![TypeId::new("seller"), TypeId::new("buyer")]),
+            },
+        }),
+        inference_exprs: InferenceExprs {
+            aver_exprs: Default::default(),
+            sift_exprs: Default::default(),
+        }
+    };
+    println!("{:?}", spec.prod_types.eval(&kb, &expr));
 }
