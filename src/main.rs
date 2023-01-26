@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 
 mod combine;
 mod parse;
+// mod eval;
 
 #[derive(Hash, Debug, Clone, Eq, PartialEq)]
 struct TypeId(String);
@@ -61,6 +62,7 @@ enum Expr {
         expr: Box<Expr>,
     },
     When {
+        // filters out 
         condition: Box<Expr>,
         result: Box<Expr>,
     },
@@ -130,20 +132,18 @@ impl ProdTypes {
         }
         x
     }
-    fn eval(&self, kb: &Kb, expr: &Expr) -> Values {
+
+    // fn eval2(&self, kb: &Kb, )
+    fn eval(&self, kb: &Kb, when: &mut Vec<&Expr>, expr: &Expr) -> Values {
         match expr {
             Expr::Constant(constant) => self.eval_const(kb, expr, constant),
             Expr::Aggregate { aggregator, expr } => todo!(),
             Expr::Take { alias, expr } => todo!(),
-            Expr::When { condition, result } => todo!(),
+            Expr::When { condition, result } => {
+                when.push(condition);
+                self.eval(kb, result)
+            },
             Expr::Product { type_id, args } => {
-                // let args_type_ids: HashSet<TypeId> = args.iter().map(Expr::type_id).collect();
-                // let params_type_ids: HashSet<TypeId> = self.0.get(type_id)
-                //     .expect("idk that type").params.as_ref()
-                //     .expect("unknown params for this type").iter().cloned().collect();
-                // if args_type_ids != params_type_ids {
-                //     panic!("params {:?} mismatch fields {:?}", params_type_ids, args_type_ids);
-                // }
                 let args: Vec<_> = args.iter().map(|arg| self.eval(kb, arg)).collect();
                 Values { type_id: type_id.clone(), datas: self.product_instances(&args) }
             }
