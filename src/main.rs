@@ -1,8 +1,8 @@
-use maplit::{hashset, hashmap};
+use maplit::{hashmap, hashset};
 use std::collections::{HashMap, HashSet};
 
-mod parse;
 mod combine;
+mod parse;
 
 #[derive(Hash, Debug, Clone, Eq, PartialEq)]
 struct TypeId(String);
@@ -52,13 +52,22 @@ enum Aggregator {
 
 enum Expr {
     Constant(Constant),
-    Aggregate { aggregator: Aggregator, expr: Box<Expr> },
-    Take { alias: TypeId, expr: Box<Expr> },
-    When { condition: Box<Expr>, result: Box<Expr> },
+    Aggregate {
+        aggregator: Aggregator,
+        expr: Box<Expr>,
+    },
+    Take {
+        alias: TypeId,
+        expr: Box<Expr>,
+    },
+    When {
+        condition: Box<Expr>,
+        result: Box<Expr>,
+    },
     Product {
         type_id: TypeId,
         args: Vec<Expr>, // invariant: Type IDs matches params exactly
-    }
+    },
 }
 
 enum EvalError {
@@ -76,7 +85,7 @@ impl TypeId {
     }
     fn new(s: &str) -> Self {
         Self(s.into())
-    }   
+    }
 }
 
 impl Constant {
@@ -90,7 +99,7 @@ impl Constant {
 
 impl Expr {
     fn type_id(&self) -> TypeId {
-        match self{
+        match self {
             Expr::Constant(constant) => constant.type_id(),
             Expr::Aggregate { aggregator: Aggregator::Num, .. } => TypeId::int(),
             Expr::Aggregate { .. } => TypeId::bit(),
@@ -136,17 +145,19 @@ impl ProdTypes {
                 //     panic!("params {:?} mismatch fields {:?}", params_type_ids, args_type_ids);
                 // }
                 let args: Vec<_> = args.iter().map(|arg| self.eval(kb, arg)).collect();
-                Values {
-                    type_id: type_id.clone(),
-                    datas: self.product_instances(&args),
-                }
-            },
+                Values { type_id: type_id.clone(), datas: self.product_instances(&args) }
+            }
         }
     }
 }
 
 impl Spec {
-    fn project<'a,'b>(&'a self, type_id: &'a TypeId, param_id: &'a TypeId, data: &'b [u8]) -> Option<&'b [u8]> {
+    fn project<'a, 'b>(
+        &'a self,
+        type_id: &'a TypeId,
+        param_id: &'a TypeId,
+        data: &'b [u8],
+    ) -> Option<&'b [u8]> {
         let mut bytes = 0;
         for p_id in self.prod_types.0.get(type_id)?.params.as_ref()? {
             if param_id == p_id {
@@ -160,48 +171,49 @@ impl Spec {
         Some(match &type_id.0 as &str {
             "int" => std::mem::size_of::<i64>(),
             "bit" => std::mem::size_of::<bool>(),
-            _ => { 
+            _ => {
                 let mut bytes = 0;
                 for field_id in self.prod_types.0.get(type_id)?.params.as_ref()? {
                     bytes += self.type_bytes(field_id)?;
                 }
                 bytes
-            } 
+            }
         })
     }
 }
 
+/*
+type person {bit}
+type seller {person} seal
+type buyer {person}  seal
+type sale {seller buyer}
+
+aver sale:{seller:person:True buyer:person:False}
+*/
+
 fn main() {
     let kb = Kb::default();
     let expr = Expr::Product {
-        type_id : TypeId::new("sale"),
-        args: vec![ 
+        type_id: TypeId::new("sale"),
+        args: vec![
             Expr::Product {
                 type_id: TypeId::new("seller"),
-                args: vec![
-                    Expr::Product {
-                        type_id: TypeId::new("person"),
-                        args: vec![
-                            Expr::Constant(Constant::Bit(true)),
-                        ],
-                    }
-                ],
+                args: vec![Expr::Product {
+                    type_id: TypeId::new("person"),
+                    args: vec![Expr::Constant(Constant::Bit(true))],
+                }],
             },
             Expr::Product {
                 type_id: TypeId::new("buyer"),
-                args: vec![
-                    Expr::Product {
-                        type_id: TypeId::new("person"),
-                        args: vec![
-                            Expr::Constant(Constant::Bit(false)),
-                        ],
-                    }
-                ],
+                args: vec![Expr::Product {
+                    type_id: TypeId::new("person"),
+                    args: vec![Expr::Constant(Constant::Bit(false))],
+                }],
             },
         ],
     };
     let spec = Spec {
-        prod_types: ProdTypes(hashmap!{
+        prod_types: ProdTypes(hashmap! {
             TypeId::new("person") => ProdDef {
                 emit: false,
                 params: Some(vec![TypeId::bit()]),
@@ -222,7 +234,7 @@ fn main() {
         inference_exprs: InferenceExprs {
             aver_exprs: Default::default(),
             sift_exprs: Default::default(),
-        }
+        },
     };
     println!("{:?}", spec.prod_types.eval(&kb, &expr));
 }
